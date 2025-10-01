@@ -1,13 +1,13 @@
 from __future__ import annotations
 import os
-from typing import Optional
+from typing import Optional, List, Dict
 
 from PySide6.QtCore import Qt, QRectF, QPoint
 from PySide6.QtGui import QAction, QStandardItemModel, QStandardItem, QBrush, QColor, QPen, QPainter
 from PySide6.QtWidgets import (
     QMainWindow, QFileDialog, QMessageBox, QSplitter, QTreeView, QWidget, QVBoxLayout, QHBoxLayout,
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QLabel, QFormLayout, QTableWidget, QTableWidgetItem,
-    QPushButton, QMenu, QInputDialog
+    QPushButton, QMenu, QInputDialog, QListWidget, QListWidgetItem, QDialog, QDialogButtonBox
 )
 
 from .parser import DTSParser
@@ -61,6 +61,10 @@ class MainWindow(QMainWindow):
         self.root_node: Optional[DTNode] = None
         self.PATH_ROLE = Qt.UserRole + 1
         self.current_file = None  # type: Optional[str]
+        self.node_items: Dict[DTNode, QGraphicsPixmapItem] = {}
+        self.highlight_items: List = []
+        self.all_nodes: List[DTNode] = []
+        self.phandle_map: Dict[int, DTNode] = {}
 
         # UI
         self._make_menu()
@@ -86,12 +90,18 @@ class MainWindow(QMainWindow):
         btn_zoom_in = QPushButton("+")
         btn_zoom_out = QPushButton("-")
         btn_fit = QPushButton("Fit")
+        btn_users = QPushButton("Users")
+        btn_clear = QPushButton("Clear")
         btn_zoom_in.setToolTip("Zoom In")
         btn_zoom_out.setToolTip("Zoom Out")
         btn_fit.setToolTip("Fit to View")
+        btn_users.setToolTip("Highlight nodes that reference the selected node")
+        btn_clear.setToolTip("Clear highlight")
         controls.addWidget(btn_zoom_in)
         controls.addWidget(btn_zoom_out)
         controls.addWidget(btn_fit)
+        controls.addWidget(btn_users)
+        controls.addWidget(btn_clear)
         controls.addStretch(1)
         center_layout.addLayout(controls)
         self.scene = QGraphicsScene()
@@ -103,6 +113,8 @@ class MainWindow(QMainWindow):
         btn_zoom_in.clicked.connect(lambda: self._zoom(1.15))
         btn_zoom_out.clicked.connect(lambda: self._zoom(1/1.15))
         btn_fit.clicked.connect(self._fit_view)
+        btn_users.clicked.connect(self._show_users)
+        btn_clear.clicked.connect(self._clear_highlight)
 
         # Right properties
         right = QWidget()
@@ -158,6 +170,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Parse error", str(e))
             return
 
+        self._build_index()
         self._populate_tree()
         self._render_graph()
 
@@ -190,6 +203,7 @@ class MainWindow(QMainWindow):
 
     def _render_graph(self):
         self.scene.clear()
+        self.highlight_items = []
         if not self.root_node:
             return
         # Layout: simple top-down tree layout
@@ -210,12 +224,12 @@ class MainWindow(QMainWindow):
                 positions[n] = (idx * x_gap, depth * y_gap)
 
         # Draw items
-        node_items = {}
+        self.node_items = {}
         for n, (x, y) in positions.items():
             item = NodeGraphicsItem(n)
             item.setPos(x, y)
             self.scene.addItem(item)
-            node_items[n] = item
+            self.node_items[n] = item
 
         # Draw edges
         pen = QPen(QColor("#888"))
@@ -237,6 +251,148 @@ class MainWindow(QMainWindow):
 
     def _zoom(self, factor: float):
         self.view.scale(factor, factor)
+
+    def _build_index(self):
+        # Collect all nodes and map phandle -> node
+        self.all_nodes = []
+        def collect(n: DTNode):
+            self.all_nodes.append(n)
+            for c in n.children:
+                collect(c)
+        if self.root_node:
+            collect(self.root_node)
+        self.phandle_map = {}
+        for n in self.all_nodes:
+            ph = self._parse_single_cell(n.properties.get("phandle"))
+            if ph is not None:
+                self.phandle_map[ph] = n
+
+    def _parse_cells(self, val: Optional[str]) -> List[int]:
+        if not val:
+            return []
+        s = val
+        # find numbers like 0x..., decimal digits inside < >
+        import re
+        nums: List[int] = []
+        for grp in re.findall(r"<([^>]*)>", s):
+            for tok in grp.strip().split():
+                try:
+                    nums.append(int(tok, 0))
+                except Exception:
+                    pass
+        return nums
+
+    def _parse_single_cell(self, val: Optional[str]) -> Optional[int]:
+        cells = self._parse_cells(val)
+        return cells[0] if cells else None
+
+    def _nodes_using(self, target: DTNode) -> List[DTNode]:
+        users: List[DTNode] = []
+        t_ph = self._parse_single_cell(target.properties.get("phandle"))
+        if t_ph is None:
+            return users
+        for n in self.all_nodes:
+            if n is target:
+                continue
+            for v in n.properties.values():
+                cells = self._parse_cells(v)
+                if t_ph in cells:
+                    users.append(n)
+                    break
+        return users
+
+    def _highlight_nodes(self, nodes: List[DTNode]):
+        # Clear old
+        self._clear_highlight()
+        # Dim all
+        for item in self.node_items.values():
+            item.setOpacity(0.25)
+        # Highlight these
+        pen = QPen(QColor("#f59e0b"))  # amber
+        pen.setWidth(3)
+        for n in nodes:
+            it = self.node_items.get(n)
+            if not it:
+                continue
+            it.setOpacity(1.0)
+            # draw ring around icon
+            x = it.x(); y = it.y()
+            r = 54
+            ring = self.scene.addEllipse(x-3, y-3, r, r, pen)
+            ring.setZValue(-1)
+            self.highlight_items.append(ring)
+
+    def _clear_highlight(self):
+        # Remove rings
+        for it in self.highlight_items:
+            self.scene.removeItem(it)
+        self.highlight_items = []
+        # Restore opacity
+        for item in self.node_items.values():
+            item.setOpacity(1.0)
+
+    def _show_users(self):
+        node = self._current_selected_node()
+        if not node:
+            return
+        users = self._nodes_using(node)
+        self._highlight_nodes(users)
+        # Show popup list
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Users of selected node")
+        v = QVBoxLayout(dlg)
+        lst = QListWidget()
+        for u in users:
+            # Store path in item data for retrieval
+            it = QListWidgetItem(f"{u.path} ({u.name})")
+            it.setData(Qt.UserRole, u.path)
+            lst.addItem(it)
+        v.addWidget(lst)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok)
+        bb.accepted.connect(dlg.accept)
+        # Support double-click to accept
+        lst.itemDoubleClicked.connect(lambda _item: dlg.accept())
+        v.addWidget(bb)
+        if dlg.exec() == QDialog.Accepted:
+            item = lst.currentItem()
+            if item:
+                path = item.data(Qt.UserRole)
+                if path:
+                    self._select_tree_path(path)
+                    # Also ensure properties panel updates
+                    idx = self.tree.currentIndex()
+                    if idx.isValid():
+                        self._on_tree_clicked(idx)
+
+    def _select_tree_path(self, path: str):
+        # Find the item with PATH_ROLE == path and select it
+        root_item = self.tree_model.item(0, 0)
+        if not root_item:
+            return
+
+        def find_item(it: QStandardItem) -> QStandardItem | None:
+            if it.data(self.PATH_ROLE) == path:
+                return it
+            for r in range(it.rowCount()):
+                child = it.child(r, 0)
+                if not child:
+                    continue
+                found = find_item(child)
+                if found:
+                    return found
+            return None
+
+        target = find_item(root_item)
+        if target:
+            index = self.tree_model.indexFromItem(target)
+            if index.isValid():
+                # Expand parents
+                parent = index.parent()
+                while parent.isValid():
+                    self.tree.expand(parent)
+                    parent = parent.parent()
+                self.tree.setCurrentIndex(index)
+                self.tree.scrollTo(index)
 
     def _on_tree_clicked(self, index):
         path = index.data(self.PATH_ROLE)
