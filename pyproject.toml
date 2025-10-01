@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dts-visualizer"
+version = "0.1.0"
+description = "Device Tree .dts visualizer in Python + Qt"
+requires-python = ">=3.9"
+dependencies = [
+  "PySide6==6.7.2",
+  "pyfdt==0.3.3",
+  "networkx==3.3",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"
