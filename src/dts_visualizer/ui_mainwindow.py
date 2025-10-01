@@ -5,8 +5,9 @@ from typing import Optional
 from PySide6.QtCore import Qt, QRectF
 from PySide6.QtGui import QAction, QStandardItemModel, QStandardItem, QBrush, QColor, QPen, QPainter
 from PySide6.QtWidgets import (
-    QMainWindow, QFileDialog, QMessageBox, QSplitter, QTreeView, QWidget, QVBoxLayout,
-    QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QLabel, QFormLayout, QTableWidget, QTableWidgetItem
+    QMainWindow, QFileDialog, QMessageBox, QSplitter, QTreeView, QWidget, QVBoxLayout, QHBoxLayout,
+    QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QLabel, QFormLayout, QTableWidget, QTableWidgetItem,
+    QPushButton
 )
 
 from .parser import DTSParser
@@ -57,6 +58,7 @@ class MainWindow(QMainWindow):
 
         self.parser = DTSParser()
         self.root_node: Optional[DTNode] = None
+        self.PATH_ROLE = Qt.UserRole + 1
 
         # UI
         self._make_menu()
@@ -75,11 +77,28 @@ class MainWindow(QMainWindow):
         # Center graph
         center = QWidget()
         center_layout = QVBoxLayout(center)
+        # Zoom controls
+        controls = QHBoxLayout()
+        btn_zoom_in = QPushButton("+")
+        btn_zoom_out = QPushButton("-")
+        btn_fit = QPushButton("Fit")
+        btn_zoom_in.setToolTip("Zoom In")
+        btn_zoom_out.setToolTip("Zoom Out")
+        btn_fit.setToolTip("Fit to View")
+        controls.addWidget(btn_zoom_in)
+        controls.addWidget(btn_zoom_out)
+        controls.addWidget(btn_fit)
+        controls.addStretch(1)
+        center_layout.addLayout(controls)
         self.scene = QGraphicsScene()
         self.view = GraphView()
         self.view.setScene(self.scene)
         center_layout.addWidget(self.view)
         splitter.addWidget(center)
+        # Wire buttons
+        btn_zoom_in.clicked.connect(lambda: self._zoom(1.15))
+        btn_zoom_out.clicked.connect(lambda: self._zoom(1/1.15))
+        btn_fit.clicked.connect(self._fit_view)
 
         # Right properties
         right = QWidget()
@@ -127,14 +146,14 @@ class MainWindow(QMainWindow):
         if not self.root_node:
             return
         root_item = QStandardItem("/")
-        root_item.setData(self.root_node.path)
+        root_item.setData(self.root_node.path, self.PATH_ROLE)
         self.tree_model.appendRow(root_item)
 
         def add_items(parent_item: QStandardItem, node: DTNode):
             for c in node.children:
                 label = c.name
                 item = QStandardItem(label)
-                item.setData(c.path)
+                item.setData(c.path, self.PATH_ROLE)
                 status = c.properties.get("status", "").strip().strip('"').lower()
                 enabled = status != "disabled"
                 item.setForeground(QBrush(QColor("#16a34a" if enabled else "#dc2626")))
@@ -143,6 +162,11 @@ class MainWindow(QMainWindow):
 
         add_items(root_item, self.root_node)
         self.tree.expandAll()
+        # Select root node and show its properties
+        root_index = self.tree_model.indexFromItem(root_item)
+        if root_index.isValid():
+            self.tree.setCurrentIndex(root_index)
+            self._on_tree_clicked(root_index)
 
     def _render_graph(self):
         self.scene.clear()
@@ -183,10 +207,19 @@ class MainWindow(QMainWindow):
                     self.scene.addLine(x1 + 24, y1 + 48, x2 + 24, y2, pen)
 
         # auto fit
-        self.view.fitInView(self.scene.itemsBoundingRect().adjusted(-40, -40, 40, 40), Qt.KeepAspectRatio)
+        self._fit_view()
+
+    def _fit_view(self):
+        if self.scene.items():
+            rect = self.scene.itemsBoundingRect().adjusted(-40, -40, 40, 40)
+            if rect.isValid():
+                self.view.fitInView(rect, Qt.KeepAspectRatio)
+
+    def _zoom(self, factor: float):
+        self.view.scale(factor, factor)
 
     def _on_tree_clicked(self, index):
-        path = index.data()
+        path = index.data(self.PATH_ROLE)
         if not self.root_node or not path:
             return
         node = self.root_node.find_by_path(path)
