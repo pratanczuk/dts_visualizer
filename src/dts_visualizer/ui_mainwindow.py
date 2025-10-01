@@ -2,17 +2,18 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-from PySide6.QtCore import Qt, QRectF
+from PySide6.QtCore import Qt, QRectF, QPoint
 from PySide6.QtGui import QAction, QStandardItemModel, QStandardItem, QBrush, QColor, QPen, QPainter
 from PySide6.QtWidgets import (
     QMainWindow, QFileDialog, QMessageBox, QSplitter, QTreeView, QWidget, QVBoxLayout, QHBoxLayout,
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QLabel, QFormLayout, QTableWidget, QTableWidgetItem,
-    QPushButton
+    QPushButton, QMenu, QInputDialog
 )
 
 from .parser import DTSParser
 from .model import DTNode
 from .icon_map import node_icon
+from .serializer import serialize
 
 
 class NodeGraphicsItem(QGraphicsPixmapItem):
@@ -59,6 +60,7 @@ class MainWindow(QMainWindow):
         self.parser = DTSParser()
         self.root_node: Optional[DTNode] = None
         self.PATH_ROLE = Qt.UserRole + 1
+        self.current_file = None  # type: Optional[str]
 
         # UI
         self._make_menu()
@@ -71,6 +73,8 @@ class MainWindow(QMainWindow):
         self.tree_model = QStandardItemModel()
         self.tree_model.setHorizontalHeaderLabels(["Node tree"])
         self.tree.setModel(self.tree_model)
+        self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._tree_context_menu)
         self.tree.clicked.connect(self._on_tree_clicked)
         splitter.addWidget(self.tree)
 
@@ -108,7 +112,18 @@ class MainWindow(QMainWindow):
         self.props_table = QTableWidget(0, 2)
         self.props_table.setHorizontalHeaderLabels(["Property", "Value"])
         self.props_table.horizontalHeader().setStretchLastSection(True)
+        self.props_table.itemChanged.connect(self._on_prop_changed)
         right_layout.addWidget(self.props_table)
+        # Add/Delete property controls
+        prop_btns = QHBoxLayout()
+        btn_add_prop = QPushButton("Add Property")
+        btn_del_prop = QPushButton("Delete Property")
+        prop_btns.addWidget(btn_add_prop)
+        prop_btns.addWidget(btn_del_prop)
+        prop_btns.addStretch(1)
+        right_layout.addLayout(prop_btns)
+        btn_add_prop.clicked.connect(self._add_property)
+        btn_del_prop.clicked.connect(self._delete_property)
         splitter.addWidget(right)
 
         splitter.setSizes([300, 700, 300])
@@ -123,6 +138,10 @@ class MainWindow(QMainWindow):
         open_act = QAction("Open DTS...", self)
         open_act.triggered.connect(self._open_dts)
         file_menu.addAction(open_act)
+        save_act = QAction("Save", self)
+        save_act.setShortcut("Ctrl+S")
+        save_act.triggered.connect(self._save_dts)
+        file_menu.addAction(save_act)
 
     def _open_dts(self):
         path, _ = QFileDialog.getOpenFileName(self, "Open DTS file", os.getcwd(), "Device Tree (*.dts)")
@@ -134,6 +153,7 @@ class MainWindow(QMainWindow):
             with open(path, "r", encoding="utf-8", errors="ignore") as f:
                 text = f.read()
             self.root_node = self.parser.parse(text)
+            self.current_file = path
         except Exception as e:
             QMessageBox.critical(self, "Parse error", str(e))
             return
@@ -226,10 +246,134 @@ class MainWindow(QMainWindow):
         if node:
             self._show_properties(node)
 
+    def _tree_context_menu(self, pos: QPoint):
+        index = self.tree.indexAt(pos)
+        if not index.isValid() or not self.root_node:
+            return
+        path = index.data(self.PATH_ROLE)
+        node = self.root_node.find_by_path(path)
+        if not node:
+            return
+        menu = QMenu(self)
+        rename_act = menu.addAction("Rename node...")
+        delete_act = menu.addAction("Delete node")
+        action = menu.exec(self.tree.viewport().mapToGlobal(pos))
+        if action == rename_act:
+            self._rename_node(node, index)
+        elif action == delete_act:
+            self._delete_node(node, index)
+
+    def _rename_node(self, node: DTNode, index):
+        new_name, ok = QInputDialog.getText(self, "Rename Node", "New name:", text=node.name)
+        if not ok or not new_name:
+            return
+        node.name = new_name
+        # update path for node and subtree
+        def update_paths(n: DTNode):
+            if n.parent:
+                parent_path = n.parent.path
+                n.path = (parent_path.rstrip('/') + '/' + n.name) if parent_path != '/' else '/' + n.name
+            for ch in n.children:
+                update_paths(ch)
+        update_paths(node)
+        # refresh tree and graph
+        self._populate_tree()
+        self._render_graph()
+        # reselect renamed node by path
+        it = self.root_node.find_by_path(node.path)
+        if it:
+            self._show_properties(it)
+
+    def _delete_node(self, node: DTNode, index):
+        parent = node.parent
+        if not parent:
+            QMessageBox.warning(self, "Delete node", "Cannot delete root node.")
+            return
+        parent.children = [c for c in parent.children if c is not node]
+        self._populate_tree()
+        self._render_graph()
+
+    def _on_prop_changed(self, item: QTableWidgetItem):
+        # Update property in model for current selected node
+        node = self._current_selected_node()
+        if not node:
+            return
+        # Rebuild properties from the table to support key rename
+        new_props: dict[str, str] = {}
+        for r in range(self.props_table.rowCount()):
+            k_item = self.props_table.item(r, 0)
+            v_item = self.props_table.item(r, 1)
+            if k_item is None or v_item is None:
+                continue
+            k = k_item.text()
+            v = v_item.text()
+            if k:
+                new_props[k] = v
+        node.properties = new_props
+        if "status" in node.properties:
+            self._render_graph()
+
+    def _save_dts(self):
+        if not self.root_node:
+            return
+        text = serialize(self.root_node)
+        path = self.current_file
+        if not path:
+            # if no current file, ask user where to save
+            path, _ = QFileDialog.getSaveFileName(self, "Save DTS", os.getcwd(), "Device Tree (*.dts)")
+            if not path:
+                return
+            self.current_file = path
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+        except Exception as e:
+            QMessageBox.critical(self, "Save error", str(e))
+
     def _show_properties(self, node: DTNode):
         self.path_label.setText(f"Path: {node.path}")
         props = node.properties
-        self.props_table.setRowCount(len(props))
-        for r, (k, v) in enumerate(sorted(props.items())):
+        self.props_table.blockSignals(True)
+        self.props_table.setRowCount(0)
+        for k, v in sorted(props.items()):
+            r = self.props_table.rowCount()
+            self.props_table.insertRow(r)
             self.props_table.setItem(r, 0, QTableWidgetItem(k))
             self.props_table.setItem(r, 1, QTableWidgetItem(v))
+        self.props_table.blockSignals(False)
+
+    def _current_selected_node(self) -> Optional[DTNode]:
+        index = self.tree.currentIndex()
+        if not index.isValid() or not self.root_node:
+            return None
+        path = index.data(self.PATH_ROLE)
+        return self.root_node.find_by_path(path)
+
+    def _add_property(self):
+        node = self._current_selected_node()
+        if not node:
+            return
+        key, ok = QInputDialog.getText(self, "Add Property", "Property name:")
+        if not ok or not key:
+            return
+        if key in node.properties:
+            QMessageBox.warning(self, "Add Property", "Property already exists.")
+            return
+        # Add with a sensible placeholder value (quoted empty string)
+        node.properties[key] = '""'
+        self._show_properties(node)
+
+    def _delete_property(self):
+        node = self._current_selected_node()
+        if not node:
+            return
+        row = self.props_table.currentRow()
+        if row < 0:
+            return
+        k_item = self.props_table.item(row, 0)
+        if not k_item:
+            return
+        key = k_item.text()
+        if key in node.properties:
+            del node.properties[key]
+        self._show_properties(node)
