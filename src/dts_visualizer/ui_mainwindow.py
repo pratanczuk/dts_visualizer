@@ -7,7 +7,7 @@ from PySide6.QtGui import QAction, QStandardItemModel, QStandardItem, QBrush, QC
 from PySide6.QtWidgets import (
     QMainWindow, QFileDialog, QMessageBox, QSplitter, QTreeView, QWidget, QVBoxLayout, QHBoxLayout,
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QLabel, QFormLayout, QTableWidget, QTableWidgetItem,
-    QPushButton, QMenu, QInputDialog, QListWidget, QListWidgetItem, QDialog, QDialogButtonBox
+    QPushButton, QMenu, QInputDialog, QListWidget, QListWidgetItem, QDialog, QDialogButtonBox, QLineEdit
 )
 
 from .parser import DTSParser
@@ -65,6 +65,11 @@ class MainWindow(QMainWindow):
         self.highlight_items: List = []
         self.all_nodes: List[DTNode] = []
         self.phandle_map: Dict[int, DTNode] = {}
+        # Search state
+        self._search_query = ""
+        self._search_results = []
+        self._search_index = -1
+        self._search_ring = None  # graphics item for search highlight
 
         # UI
         self._make_menu()
@@ -72,7 +77,17 @@ class MainWindow(QMainWindow):
         splitter = QSplitter(self)
         self.setCentralWidget(splitter)
 
-        # Left tree
+        # Left panel: search + tree
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        search_row = QHBoxLayout()
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("Search nodes by name...")
+        btn_search = QPushButton("Search")
+        search_row.addWidget(self.search_edit)
+        search_row.addWidget(btn_search)
+        left_layout.addLayout(search_row)
+
         self.tree = QTreeView()
         self.tree_model = QStandardItemModel()
         self.tree_model.setHorizontalHeaderLabels(["Node tree"])
@@ -80,7 +95,11 @@ class MainWindow(QMainWindow):
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._tree_context_menu)
         self.tree.clicked.connect(self._on_tree_clicked)
-        splitter.addWidget(self.tree)
+        left_layout.addWidget(self.tree)
+        splitter.addWidget(left)
+        # Wire search
+        btn_search.clicked.connect(self._search_nodes)
+        self.search_edit.returnPressed.connect(self._search_nodes)
 
         # Center graph
         center = QWidget()
@@ -171,6 +190,10 @@ class MainWindow(QMainWindow):
             return
 
         self._build_index()
+        # reset search state on new file load
+        self._search_query = ""
+        self._search_results = []
+        self._search_index = -1
         self._populate_tree()
         self._render_graph()
 
@@ -204,6 +227,7 @@ class MainWindow(QMainWindow):
     def _render_graph(self):
         self.scene.clear()
         self.highlight_items = []
+        self._search_ring = None
         if not self.root_node:
             return
         # Layout: simple top-down tree layout
@@ -251,6 +275,53 @@ class MainWindow(QMainWindow):
 
     def _zoom(self, factor: float):
         self.view.scale(factor, factor)
+
+    def _focus_node(self, node: DTNode, *, highlight: bool = False):
+        # Select in tree and center in view if present
+        self._select_tree_path(node.path)
+        item = self.node_items.get(node)
+        if item:
+            self.view.centerOn(item)
+            if highlight:
+                self._set_search_highlight(item)
+
+    def _set_search_highlight(self, item: QGraphicsPixmapItem):
+        # remove previous search ring
+        if self._search_ring is not None:
+            try:
+                self.scene.removeItem(self._search_ring)
+            except Exception:
+                pass
+            self._search_ring = None
+        # draw a blue ring around the item without dimming others
+        x = item.x(); y = item.y()
+        r = 56
+        pen = QPen(QColor("#3b82f6"))  # blue
+        pen.setWidth(3)
+        ring = self.scene.addEllipse(x-4, y-4, r, r, pen)
+        ring.setZValue(-1)
+        self._search_ring = ring
+
+    def _search_nodes(self):
+        text = self.search_edit.text().strip()
+        if not text:
+            return
+        q = text.lower()
+        # Rebuild results if query changed or empty
+        if q != self._search_query or not self._search_results:
+            # Ensure index is available
+            if not self.all_nodes:
+                self._build_index()
+            self._search_results = [n for n in self.all_nodes if q in n.name.lower()]
+            self._search_query = q
+            self._search_index = -1
+        if not self._search_results:
+            QMessageBox.information(self, "Search", f"No node found matching '{text}'.")
+            return
+        # Advance to next match
+        self._search_index = (self._search_index + 1) % len(self._search_results)
+        node = self._search_results[self._search_index]
+        self._focus_node(node, highlight=True)
 
     def _build_index(self):
         # Collect all nodes and map phandle -> node
