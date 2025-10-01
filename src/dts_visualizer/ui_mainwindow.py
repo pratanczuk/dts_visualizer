@@ -15,6 +15,7 @@ from .model import DTNode
 from .icon_map import node_icon
 from .serializer import serialize
 from .exporter import export_dtsi
+from .bindings import load_bindings, BindingsIndex
 
 
 class NodeGraphicsItem(QGraphicsPixmapItem):
@@ -66,6 +67,7 @@ class MainWindow(QMainWindow):
         self.highlight_items: List = []
         self.all_nodes: List[DTNode] = []
         self.phandle_map: Dict[int, DTNode] = {}
+        self.bindings_index = None  # type: BindingsIndex | None
         # Search state
         self._search_query = ""
         self._search_results = []
@@ -174,6 +176,10 @@ class MainWindow(QMainWindow):
         save_act.setShortcut("Ctrl+S")
         save_act.triggered.connect(self._save_dts)
         file_menu.addAction(save_act)
+        bindings_menu = self.menuBar().addMenu("Bindings")
+        load_bind_act = QAction("Load Bindings Directory...", self)
+        load_bind_act.triggered.connect(self._load_bindings_dir)
+        bindings_menu.addAction(load_bind_act)
 
     def _open_dts(self):
         path, _ = QFileDialog.getOpenFileName(self, "Open DTS file", os.getcwd(), "Device Tree (*.dts)")
@@ -338,6 +344,16 @@ class MainWindow(QMainWindow):
             ph = self._parse_single_cell(n.properties.get("phandle"))
             if ph is not None:
                 self.phandle_map[ph] = n
+        # Build symbols map from __symbols__ node if present
+        self.symbols_map: Dict[str, str] = {}
+        if self.root_node:
+            sym = next((c for c in self.root_node.children if c.name == "__symbols__"), None)
+            if sym:
+                for k, v in sym.properties.items():
+                    # value is a quoted full path like "/path/to/node"
+                    p = (v or "").strip().strip('"')
+                    if p:
+                        self.symbols_map[k] = p
 
     def _parse_cells(self, val: Optional[str]) -> List[int]:
         if not val:
@@ -354,6 +370,28 @@ class MainWindow(QMainWindow):
                     pass
         return nums
 
+    def _extract_label_refs(self, val: Optional[str]) -> List[int]:
+        if not val:
+            return []
+        import re
+        labels = re.findall(r"&([A-Za-z_][A-Za-z0-9_]*)", val)
+        phs: List[int] = []
+        for lbl in labels:
+            path = getattr(self, 'symbols_map', {}).get(lbl)
+            if not path or not self.root_node:
+                continue
+            node = self.root_node.find_by_path(path)
+            if not node:
+                continue
+            ph = self._parse_single_cell(node.properties.get("phandle"))
+            if ph is not None:
+                phs.append(ph)
+        return phs
+
+    def _extract_phandle_refs(self, val: Optional[str]) -> List[int]:
+        # Combine numeric cells and &label resolved via __symbols__
+        return list(dict.fromkeys(self._parse_cells(val) + self._extract_label_refs(val)))
+
     def _parse_single_cell(self, val: Optional[str]) -> Optional[int]:
         cells = self._parse_cells(val)
         return cells[0] if cells else None
@@ -366,12 +404,69 @@ class MainWindow(QMainWindow):
         for n in self.all_nodes:
             if n is target:
                 continue
-            for v in n.properties.values():
-                cells = self._parse_cells(v)
+            for k, v in n.properties.items():
+                if not self._node_prop_may_reference_phandle(n, k):
+                    continue
+                cells = self._extract_phandle_refs(v)
                 if t_ph in cells:
                     users.append(n)
                     break
         return users
+
+    def _node_prop_may_reference_phandle(self, node: DTNode, key: str) -> bool:
+        # Prefer bindings if available and node compatible is known
+        comp = (node.properties.get("compatible") or "").strip().strip('"')
+        if self.bindings_index and comp:
+            if self.bindings_index.may_reference_phandle(comp, key):
+                return True
+        # fallback heuristic
+        return self._prop_may_reference_phandle(key)
+
+    def _prop_may_reference_phandle(self, key: str) -> bool:
+        # Common consumer properties that hold phandles or phandle-arrays
+        if key == "phandle" or key == "linux,phandle":
+            return False
+        base_keys = {
+            # per user rules
+            "interrupt-parent",
+            "clocks",  # names are not phandles; clocks themselves are
+            "dmas",    # names are not phandles; dmas themselves are
+            "pinctrl-0", "pinctrl-1", "pinctrl-2",
+            "iommus",
+            # Plus common ones
+            "assigned-clocks", "assigned-clock-parents",
+            "resets", "gpios", "interrupts-extended",
+            "phys", "power-domains", "memory-region",
+            "thermal-sensors", "remote-endpoint", "sound-dai",
+        }
+        if key in base_keys:
+            return True
+        # Regulator supplies and other pattern-based
+        if key.endswith("-supply"):
+            return True
+        # PHY handle
+        if key in ("phy-handle", "phy"):
+            return True
+        if key.endswith("-gpios") or key.endswith("-gpio"):
+            return True
+        if key.endswith("-phandle") or key.endswith("-phandles"):
+            return True
+        # pinctrl lists beyond 0..2
+        if key.startswith("pinctrl-"):
+            return True
+        return False
+
+    def _load_bindings_dir(self):
+        path = QFileDialog.getExistingDirectory(self, "Select Linux bindings directory (Documentation/devicetree/bindings)")
+        if not path:
+            return
+        try:
+            idx = load_bindings(path)
+        except Exception as e:
+            QMessageBox.critical(self, "Bindings error", str(e))
+            return
+        self.bindings_index = idx
+        QMessageBox.information(self, "Bindings", "Bindings loaded. Users feature will use them when possible.")
 
     def _highlight_nodes(self, nodes: List[DTNode]):
         # Clear old
