@@ -8,6 +8,25 @@ A small Python Qt app to load a Device Tree Source (.dts) file and visualize nod
 
 ## Run
 
+### Ubuntu prerequisites
+
+Install system packages required for Qt, OpenGL, and common DT tooling:
+
+```bash
+sudo apt update
+sudo apt install -y \
+	python3-venv python3-pip \
+	libxcb-xinerama0 libxcb-cursor0 libxkbcommon-x11-0 \
+	libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 \
+	libegl1-mesa libgl1-mesa-glx \
+	xdg-utils \
+	device-tree-compiler dtc
+```
+
+Notes:
+- On some distros you may see a benign warning about “xapp-gtk3-module”. It’s optional and not required by this app.
+- If you run in a minimal container/WSL, ensure an X server is available or use an X11 forwarding setup.
+
 1. Create venv and install deps
 
 ```bash
