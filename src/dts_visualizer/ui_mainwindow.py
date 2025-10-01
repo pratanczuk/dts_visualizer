@@ -14,6 +14,7 @@ from .parser import DTSParser
 from .model import DTNode
 from .icon_map import node_icon
 from .serializer import serialize
+from .exporter import export_dtsi
 
 
 class NodeGraphicsItem(QGraphicsPixmapItem):
@@ -484,11 +485,26 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         rename_act = menu.addAction("Rename node...")
         delete_act = menu.addAction("Delete node")
+        export_act = menu.addAction("Export to .dtsi...")
         action = menu.exec(self.tree.viewport().mapToGlobal(pos))
         if action == rename_act:
             self._rename_node(node, index)
         elif action == delete_act:
             self._delete_node(node, index)
+        elif action == export_act:
+            self._export_dtsi(node)
+
+    def _export_dtsi(self, node: DTNode):
+        text = export_dtsi(node)
+        default_name = f"{node.name.split('@')[0] or 'node'}.dtsi"
+        path, _ = QFileDialog.getSaveFileName(self, "Export .dtsi", default_name, "DTS Include (*.dtsi)")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+        except Exception as e:
+            QMessageBox.critical(self, "Export error", str(e))
 
     def _rename_node(self, node: DTNode, index):
         new_name, ok = QInputDialog.getText(self, "Rename Node", "New name:", text=node.name)
