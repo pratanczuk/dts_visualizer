@@ -102,6 +102,18 @@ def _schema_is_phandle(schema: Any) -> bool:
     if isinstance(items, dict):
         if isinstance(items.get('$ref'), str) and ('/phandle' in items['$ref']):
             return True
+    if isinstance(items, list):
+        for it in items:
+            if isinstance(it, dict):
+                r = it.get('$ref')
+                if isinstance(r, str) and ('/phandle' in r):
+                    return True
+    # contains key used for arrays with at least one phandle element
+    contains = schema.get('contains')
+    if isinstance(contains, dict):
+        r = contains.get('$ref')
+        if isinstance(r, str) and ('/phandle' in r):
+            return True
     # oneOf/anyOf nesting
     for key in ('oneOf', 'anyOf', 'allOf'):
         arr = schema.get(key)
