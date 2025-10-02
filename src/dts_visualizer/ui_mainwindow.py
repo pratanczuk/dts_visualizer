@@ -698,33 +698,58 @@ class MainWindow(QMainWindow):
         if v_item is None:
             return
         val = v_item.text() or ""
-        # Try to extract a hex value (0x...)
         import re
-        hexes = re.findall(r"0x[0-9a-fA-F]+", val)
-        if not hexes:
+        # Collect numeric cells (hex or decimal) inside <...>
+        nums = self._parse_cells(val)
+        # Collect &label references
+        labels = re.findall(r"&([A-Za-z_][A-Za-z0-9_]*)", val)
+        # Prepare context menu if we have any candidates
+        if not nums and not labels:
             return
         menu = QMenu(self)
-        # If multiple, list them
-        actions = []
-        for hx in hexes:
-            act = menu.addAction(f"Jump to phandle {hx}")
-            actions.append((act, hx))
+        actions = []  # list of (action, kind, payload)
+        # Add numeric phandle actions
+        seen_nums = set()
+        for n in nums:
+            if n in seen_nums:
+                continue
+            seen_nums.add(n)
+            act = menu.addAction(f"Jump to phandle 0x{n:x} ({n})")
+            actions.append((act, 'phandle', n))
+        # Add label actions
+        seen_labels = set()
+        for lbl in labels:
+            if lbl in seen_labels:
+                continue
+            seen_labels.add(lbl)
+            act = menu.addAction(f"Jump to &{lbl}")
+            actions.append((act, 'label', lbl))
         chosen = menu.exec(self.props_table.viewport().mapToGlobal(pos))
         if not chosen:
             return
-        for act, hx in actions:
+        # Ensure indices are up-to-date
+        self._build_index()
+        for act, kind, payload in actions:
             if act is chosen:
-                try:
-                    ph = int(hx, 16)
-                except Exception:
-                    return
-                # ensure index is built
-                self._build_index()
-                node = self.phandle_map.get(ph)
-                if node:
-                    self._focus_node(node, highlight=True)
-                else:
-                    QMessageBox.information(self, "Jump", f"No node with phandle {hx} found.")
+                if kind == 'phandle':
+                    ph = int(payload)
+                    node = self.phandle_map.get(ph)
+                    if node:
+                        self._focus_node(node, highlight=True)
+                    else:
+                        QMessageBox.information(self, "Jump", f"No node with phandle 0x{ph:x} found.")
+                else:  # label
+                    lbl = payload
+                    path = getattr(self, 'symbols_map', {}).get(lbl)
+                    if not path:
+                        QMessageBox.information(self, "Jump", f"No path found for &{lbl} (no __symbols__).")
+                        return
+                    self._select_tree_path(path)
+                    # focus in graph if we can find the node
+                    if self.root_node:
+                        node = self.root_node.find_by_path(path)
+                        if node:
+                            self._focus_node(node, highlight=True)
                 break
 
     def _add_property(self):
