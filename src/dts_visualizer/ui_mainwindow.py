@@ -147,6 +147,9 @@ class MainWindow(QMainWindow):
         self.props_table.setHorizontalHeaderLabels(["Property", "Value"])
         self.props_table.horizontalHeader().setStretchLastSection(True)
         self.props_table.itemChanged.connect(self._on_prop_changed)
+        # Right-click: jump to phandle in value
+        self.props_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.props_table.customContextMenuRequested.connect(self._props_context_menu)
         right_layout.addWidget(self.props_table)
         # Add/Delete property controls
         prop_btns = QHBoxLayout()
@@ -686,6 +689,43 @@ class MainWindow(QMainWindow):
             return None
         path = index.data(self.PATH_ROLE)
         return self.root_node.find_by_path(path)
+
+    def _props_context_menu(self, pos: QPoint):
+        row = self.props_table.currentRow()
+        if row < 0:
+            return
+        v_item = self.props_table.item(row, 1)
+        if v_item is None:
+            return
+        val = v_item.text() or ""
+        # Try to extract a hex value (0x...)
+        import re
+        hexes = re.findall(r"0x[0-9a-fA-F]+", val)
+        if not hexes:
+            return
+        menu = QMenu(self)
+        # If multiple, list them
+        actions = []
+        for hx in hexes:
+            act = menu.addAction(f"Jump to phandle {hx}")
+            actions.append((act, hx))
+        chosen = menu.exec(self.props_table.viewport().mapToGlobal(pos))
+        if not chosen:
+            return
+        for act, hx in actions:
+            if act is chosen:
+                try:
+                    ph = int(hx, 16)
+                except Exception:
+                    return
+                # ensure index is built
+                self._build_index()
+                node = self.phandle_map.get(ph)
+                if node:
+                    self._focus_node(node, highlight=True)
+                else:
+                    QMessageBox.information(self, "Jump", f"No node with phandle {hx} found.")
+                break
 
     def _add_property(self):
         node = self._current_selected_node()
